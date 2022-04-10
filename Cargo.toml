@@ -1,0 +1,16 @@
+[package]
+name = "vault-env-exec"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-sigv4 = "0.9"
+base64 = "0.13"
+clap = { version = "3.1", features = ["derive", "env"] }
+http = "0.2"
+nix = "0.23"
+reqwest = { version = "0.11", features = ["json"] }
+serde = "1.0"
+serde_json = "1.0"
+tokio = { version = "1.17", features = ["macros", "rt-multi-thread"] }
+uuid = { version = "0.4", features = ["v4"] }
