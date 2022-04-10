@@ -117,7 +117,7 @@ async fn auth_vault(
         .danger_accept_invalid_certs(true)
         .build()
         .unwrap()
-        .post(format!("{}/v1/auth/aws/login", vault_addr))
+        .post(format!("{vault_addr}/v1/auth/aws/login"))
         .header("X-Vault-AWS-IAM-Server-ID", vault_security_header)
         .json(&login_data);
 
