@@ -14,3 +14,6 @@ serde = "1.0"
 serde_json = "1.0"
 tokio = { version = "1.17", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "0.4", features = ["v4"] }
+slog = { version = "2.7", features = ["max_level_trace", "release_max_level_warn"] }
+slog-term = "2.9"
+slog-json = "2.6"
