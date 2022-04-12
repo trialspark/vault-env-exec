@@ -52,43 +52,6 @@ struct Args {
     args: Vec<String>,
 }
 
-struct Context {
-    logger: slog::Logger,
-}
-
-fn decode_certificate(path: &Option<String>) -> Option<reqwest::Certificate> {
-    if let Some(vault_cacert) = path {
-        std::fs::File::open(vault_cacert)
-            .map(|fh| std::io::BufReader::new(fh))
-            .map(|buffer| std::io::BufRead::lines(buffer))
-            .map(|lines| lines.filter_map(|line| line.ok().filter(|line| !line.contains("-"))))
-            .map(std::iter::Iterator::collect::<Vec<String>>)
-            .map(|lines| lines.join(""))
-            .map_err(|e| Box::new(e) as Box<dyn error::Error>)
-            .and_then(|cert| base64::decode(cert).map_err(|e| Box::new(e) as Box<dyn error::Error>))
-            .and_then(|der| {
-                reqwest::Certificate::from_der(&der)
-                    .map_err(|e| Box::new(e) as Box<dyn error::Error>)
-            })
-            .ok()
-    } else {
-        None
-    }
-}
-
-fn vault_https_client(
-    _ctx: &Context,
-    vault_cacert: &Option<String>,
-) -> Result<reqwest::Client, reqwest::Error> {
-    let builder = reqwest::Client::builder();
-
-    if let Some(cert) = decode_certificate(vault_cacert) {
-        builder.add_root_certificate(cert).build()
-    } else {
-        builder.build()
-    }
-}
-
 fn convert(headers: &HeaderMap<HeaderValue>) -> HashMap<String, Vec<String>> {
     headers
         .into_iter()
@@ -100,144 +63,225 @@ fn convert(headers: &HeaderMap<HeaderValue>) -> HashMap<String, Vec<String>> {
         })
 }
 
-#[tokio::main]
-async fn auth_vault(
-    ctx: &Context,
-    aws_region: &str,
-    aws_access_key_id: &str,
-    aws_secret_access_key: &str,
-    vault_security_header: &str,
-    vault_addr: &str,
-    vault_cacert: &Option<String>,
-) -> Result<String, Box<dyn error::Error>> {
-    info!(ctx.logger, "Setting up mock sts:GetCallerIdentity request");
-    let request_method = "POST";
-    let request_body = b"Action=GetCallerIdentity&Version=2011-06-15";
+struct VaultClient {
+    logger: slog::Logger,
+    aws_region: String,
+    aws_access_key_id: String,
+    aws_secret_access_key: String,
+    addr: String,
+    cacert: Option<String>,
+    security_header: Option<String>,
+    token: Option<String>,
+}
 
-    let mut request = http::Request::builder()
-        .method(request_method)
-        .uri("https://sts.amazonaws.com")
-        .header(
-            "Content-Type",
-            "application/x-www-form-urlencoded;charset=utf-8",
-        )
-        .header("X-Vault-AWS-IAM-Server-ID", vault_security_header)
-        .body(request_body)
-        .unwrap();
+impl VaultClient {
+    fn new(
+        logger: slog::Logger,
+        addr: String,
+        cacert: Option<String>,
+        security_header: Option<String>,
+        aws_region: String,
+        aws_access_key_id: String,
+        aws_secret_access_key: String,
+    ) -> VaultClient {
+        VaultClient {
+            logger: logger,
+            addr: addr,
+            cacert: cacert,
+            security_header: security_header,
+            token: None,
+            aws_region: aws_region,
+            aws_access_key_id: aws_access_key_id,
+            aws_secret_access_key: aws_secret_access_key,
+        }
+    }
 
-    info!(ctx.logger, "Setting up request signing parameters");
-    let signing_settings = SigningSettings::default();
-    let signing_params = SigningParams::builder()
-        .region(aws_region)
-        .access_key(aws_access_key_id)
-        .secret_key(aws_secret_access_key)
-        .service_name("sts")
-        .time(SystemTime::now())
-        .settings(signing_settings)
+    fn https_client(&self) -> Result<reqwest::Client, reqwest::Error> {
+        let builder = reqwest::Client::builder();
+
+        match decode_certificate(&self.logger, &self.cacert) {
+            Some(cert) => builder.add_root_certificate(cert),
+            None => builder,
+        }
         .build()
-        .unwrap();
+    }
 
-    info!(ctx.logger, "Sign mock sts:GetCallerIdentity request");
-    let signable_request = SignableRequest::from(&request);
-    let (signing_instructions, _signature) = sign(signable_request, &signing_params)
-        .unwrap()
-        .into_parts();
-    signing_instructions.apply_to_request(&mut request);
+    #[tokio::main]
+    async fn vault_request(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<serde_json::Value, Box<dyn error::Error>> {
+        let request = request
+            .header(
+                "X-Vault-AWS-IAM-Server-ID",
+                self.security_header.as_ref().unwrap_or(&String::from("")),
+            )
+            .header(
+                "X-Vault-Token",
+                self.token.as_ref().unwrap_or(&String::from("")),
+            );
 
-    info!(ctx.logger, "Building Vault auth request body");
-    let nonce = Uuid::new_v4().hyphenated().to_string();
-    let iam_request_url = base64::encode(b"https://sts.amazonaws.com");
-    let iam_request_headers = serde_json::to_string(&convert(request.headers()))
-        .map(base64::encode)
-        .unwrap();
-    let iam_request_body = base64::encode(request_body);
+        trace!(self.logger, "Sending vault request - {:?}", request);
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(e) => {
+                error!(self.logger, "Failed to send request to Vault - {e}");
+                return Err(Box::new(e) as Box<dyn error::Error>);
+            }
+        };
 
-    let login_data = HashMap::from([
-        ("role", "jenkins-vault-writer"),
-        ("nonce", &nonce),
-        ("iam_http_request_method", request_method),
-        ("iam_request_url", &iam_request_url),
-        ("iam_request_headers", &iam_request_headers),
-        ("iam_request_body", &iam_request_body),
-    ]);
+        let text = match response.text().await {
+            Ok(text) => text,
+            Err(e) => {
+                error!(self.logger, "Failed to read response body from Vault - {e}");
+                return Err(Box::new(e) as Box<dyn error::Error>);
+            }
+        };
 
-    info!(ctx.logger, "Build Vault auth request");
-    let request = vault_https_client(ctx, vault_cacert)
-        .unwrap()
-        .post(format!("{vault_addr}/v1/auth/aws/login"))
-        .header("X-Vault-AWS-IAM-Server-ID", vault_security_header)
-        .json(&login_data);
+        trace!(self.logger, "Parsing vault response");
+        serde_json::from_str::<serde_json::Value>(&text)
+            .or_else(|e| Err(Box::new(e) as Box<dyn error::Error>))
+    }
 
-    info!(ctx.logger, "Send Vault auth reqest");
-    let text = request.send().await?.text().await?;
+    fn authenticate(mut self) -> Result<VaultClient, Box<dyn error::Error>> {
+        info!(self.logger, "Setting up mock sts:GetCallerIdentity request");
+        let request_method = "POST";
+        let request_body = b"Action=GetCallerIdentity&Version=2011-06-15";
 
-    info!(ctx.logger, "Parsing Vault response json body");
-    serde_json::from_str::<serde_json::Value>(&text)
-        .or_else(|e| Err(Box::new(e) as Box<dyn error::Error>))
-        .and_then(|json| {
+        let request_builder = http::Request::builder()
+            .method(request_method)
+            .uri("https://sts.amazonaws.com")
+            .header(
+                "Content-Type",
+                "application/x-www-form-urlencoded;charset=utf-8",
+            )
+            .header(
+                "X-Vault-AWS-IAM-Server-ID",
+                self.security_header.as_ref().unwrap_or(&String::from("")),
+            )
+            .body(request_body);
+
+        let mut request = match request_builder {
+            Ok(request) => request,
+            Err(e) => {
+                error!(self.logger, "Error building vault auth request - {e}");
+                return Err(Box::new(e) as Box<dyn error::Error>);
+            }
+        };
+
+        info!(self.logger, "Setting up request signing parameters");
+        let signing_settings = SigningSettings::default();
+        let signing_params = SigningParams::builder()
+            .region(&self.aws_region)
+            .access_key(&self.aws_access_key_id)
+            .secret_key(&self.aws_secret_access_key)
+            .service_name("sts")
+            .time(SystemTime::now())
+            .settings(signing_settings)
+            .build()?;
+
+        info!(self.logger, "Sign mock sts:GetCallerIdentity request");
+        let signable_request = SignableRequest::from(&request);
+        let (signing_instructions, _signature) = sign(signable_request, &signing_params)
+            .unwrap()
+            .into_parts();
+        signing_instructions.apply_to_request(&mut request);
+
+        info!(self.logger, "Building Vault auth request body");
+        let nonce = Uuid::new_v4().hyphenated().to_string();
+        let iam_request_url = base64::encode(b"https://sts.amazonaws.com");
+        let iam_request_headers =
+            serde_json::to_string(&convert(request.headers())).map(base64::encode)?;
+        let iam_request_body = base64::encode(request_body);
+
+        let login_data = HashMap::from([
+            ("role", "jenkins-vault-writer"),
+            ("nonce", &nonce),
+            ("iam_http_request_method", request_method),
+            ("iam_request_url", &iam_request_url),
+            ("iam_request_headers", &iam_request_headers),
+            ("iam_request_body", &iam_request_body),
+        ]);
+
+        let request = self
+            .https_client()?
+            .post(format!("{}/v1/auth/aws/login", self.addr))
+            .json(&login_data);
+
+        self.token = Some(self.vault_request(request).and_then(|json| {
             json["auth"]["client_token"]
                 .as_str()
                 .map(String::from)
                 .ok_or_else(|| {
-                    warn!(ctx.logger, "No client token found in auth json");
-                    Box::new(serde_json::Error::custom("No client token found"))
+                    error!(self.logger, "No client auth token found");
+                    Box::new(serde_json::Error::custom("No client auth token"))
                         as Box<dyn error::Error>
                 })
-        })
-}
+        })?);
 
-#[tokio::main]
-async fn vault_kv_get(
-    ctx: &Context,
-    vault_cacert: &Option<String>,
-    url: &str,
-    token: &str,
-    engine: &str,
-    path: &str,
-    key: &str,
-) -> Result<String, Box<dyn error::Error>> {
-    info!(
-        ctx.logger,
-        "Building Vault lookup request for {engine}/{path}/{key}"
-    );
-    let request = vault_https_client(ctx, vault_cacert)
-        .unwrap()
-        .get(format!("{url}/v1/{engine}/data/{path}"))
-        .header("X-Vault-Token", token);
+        Ok(self)
+    }
 
-    info!(ctx.logger, "Sending Vault lookup request");
-    let text = request.send().await?.text().await?;
+    fn read(&self, engine: &str, path: &str, key: &str) -> Result<String, Box<dyn error::Error>> {
+        let request = self
+            .https_client()?
+            .get(format!("{}/v1/{engine}/data/{path}", self.addr));
 
-    info!(ctx.logger, "Parsing Vault lookup json body");
-    serde_json::from_str::<serde_json::Value>(&text)
-        .or_else(|e| Err(Box::new(e) as Box<dyn error::Error>))
-        .and_then(|json| {
+        self.vault_request(request).and_then(|json| {
             json["data"]["data"][key]
                 .as_str()
                 .map(String::from)
                 .ok_or_else(|| {
                     warn!(
-                        ctx.logger,
+                        self.logger,
                         "No secret value found for vault:{engine}:{path}:{key}"
                     );
                     Box::new(serde_json::Error::custom("No key found")) as Box<dyn error::Error>
                 })
         })
+    }
 }
 
-fn process_env(ctx: &Context, args: &Args) -> Result<Vec<CString>, Box<dyn error::Error>> {
-    let token = auth_vault(
-        ctx,
-        &args.aws_region,
-        &args.aws_access_key_id,
-        &args.aws_secret_access_key,
-        &args.vault_security_header,
-        &args.vault_addr,
-        &args.vault_cacert,
-    )
-    .unwrap();
+fn decode_certificate(
+    logger: &slog::Logger,
+    path: &Option<String>,
+) -> Option<reqwest::Certificate> {
+    if let Some(vault_cacert) = path {
+        let reader = match std::fs::File::open(vault_cacert) {
+            Ok(fh) => std::io::BufReader::new(fh),
+            Err(e) => {
+                error!(logger, "Failed to read cert {vault_cacert} - {e}");
+                return None;
+            }
+        };
 
-    Ok(std::env::vars()
+        let cert_body = std::io::BufRead::lines(reader)
+            .filter_map(|line| line.ok().filter(|line| !line.contains("-")))
+            .collect::<Vec<String>>()
+            .join("");
+
+        let decoded_cert = match base64::decode(cert_body) {
+            Ok(decoded_cert) => decoded_cert,
+            Err(e) => {
+                error!(logger, "Failed to decode certificate - {e}");
+                return None;
+            }
+        };
+
+        match reqwest::Certificate::from_der(&decoded_cert) {
+            Ok(cert) => Some(cert),
+            Err(e) => {
+                error!(logger, "Failed to create Certificate - {e}");
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
+fn build_environment(vault_client: &VaultClient) -> Vec<CString> {
+    std::env::vars()
         .map(|(key, value)| {
             (
                 key,
@@ -245,47 +289,69 @@ fn process_env(ctx: &Context, args: &Args) -> Result<Vec<CString>, Box<dyn error
                     let fields: Vec<&str> = value.split(":").collect();
                     let (_, engine, path, key) = (fields[0], fields[1], fields[2], fields[3]);
 
-                    match vault_kv_get(
-                        ctx,
-                        &args.vault_cacert,
-                        &args.vault_addr,
-                        &token,
-                        &engine,
-                        &path,
-                        &key,
-                    ) {
-                        Ok(v) => v,
-                        Err(_) => value,
-                    }
+                    vault_client.read(&engine, &path, &key).unwrap_or(value)
                 } else {
                     value
                 },
             )
         })
         .map(|(key, value)| CString::new([key, value].join("=")).unwrap())
-        .collect())
+        .collect()
 }
 
-fn switch_user(ctx: &Context, user_spec: &String) {
-    trace!(ctx.logger, "Entering switch_user");
-
+fn switch_user(ctx: &VaultClient, user_spec: &String) -> Result<(), Box<dyn error::Error>> {
     let user_spec: Vec<&str> = user_spec.split(":").collect();
-    let (user, group) = match user_spec.len() {
+    let (user_name, group_name) = match user_spec.len() {
         2 => (user_spec[0], user_spec[1]),
         _ => (user_spec[0], user_spec[0]),
     };
 
-    let user = User::from_name(&user)
-        .expect("User lookup failed")
-        .expect("User not found");
+    let user = User::from_name(&user_name).or_else(|e| {
+        error!(ctx.logger, "Failed to lookup user name: {user_name} - {e}");
+        return Err(Box::new(e) as Box<dyn error::Error>);
+    })?;
 
-    let group = Group::from_name(&group)
-        .expect("Group lookup failed")
-        .expect("Group not found");
+    let group = Group::from_name(&group_name).or_else(|e| {
+        error!(
+            ctx.logger,
+            "Failed to lookup group name: {group_name} - {e}"
+        );
+        Err(Box::new(e) as Box<dyn error::Error>)
+    })?;
 
-    chdir(&user.dir).expect("chdir failed");
-    setgid(group.gid).expect("setgid failed");
-    setuid(user.uid).expect("setuid failed");
+    if let Some(group) = group {
+        setgid(group.gid).or_else(|e| {
+            error!(ctx.logger, "Failed to set GID to {} - {e}", group.gid);
+            Err(Box::new(e) as Box<dyn error::Error>)
+        })?;
+    } else {
+        warn!(
+            ctx.logger,
+            "No group named {group_name} found - Not setting GID"
+        );
+    }
+
+    if let Some(user) = user {
+        chdir(&user.dir).or_else(|e| {
+            error!(
+                ctx.logger,
+                "Failed to change directory {:?} - {e}", user.dir
+            );
+            Err(Box::new(e) as Box<dyn error::Error>)
+        })?;
+
+        setuid(user.uid).or_else(|e| {
+            error!(ctx.logger, "Failed to set UID to {} - {e}", user.uid);
+            Err(Box::new(e) as Box<dyn error::Error>)
+        })?;
+    } else {
+        warn!(
+            ctx.logger,
+            "No user named {user_name} found - Not setting UID"
+        );
+    }
+
+    Ok(())
 }
 
 fn exec(command: String, args: &Vec<String>, env: &Vec<CString>) {
@@ -300,7 +366,7 @@ fn exec(command: String, args: &Vec<String>, env: &Vec<CString>) {
     execve(cmd.as_c_str(), &cmd_args, env).expect("exec failed");
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn error::Error>> {
     let args = Args::parse();
 
     #[cfg(debug_assertions)]
@@ -313,19 +379,28 @@ fn main() {
     #[cfg(not(debug_assertions))]
     let logger = Mutex::new(slog_json::Json::default(std::io::stderr()));
 
-    let ctx = Context {
-        logger: slog::Logger::root(
+    let vault_client = VaultClient::new(
+        slog::Logger::root(
             logger.map(slog::Fuse),
             o!(
                 "version" => env!("CARGO_PKG_VERSION"),
                 "app" => env!("CARGO_PKG_NAME")
             ),
         ),
-    };
+        args.vault_addr,
+        args.vault_cacert,
+        Some(args.vault_security_header),
+        args.aws_region,
+        args.aws_access_key_id,
+        args.aws_secret_access_key,
+    )
+    .authenticate()?;
 
-    switch_user(&ctx, &args.user_spec);
+    switch_user(&vault_client, &args.user_spec)?;
 
-    let env = process_env(&ctx, &args).unwrap();
+    let env = build_environment(&vault_client);
 
     exec(args.command, &args.args, &env);
+
+    Ok(())
 }
