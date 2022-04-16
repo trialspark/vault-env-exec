@@ -247,34 +247,32 @@ fn decode_certificate(
     path: &Option<String>,
 ) -> Option<reqwest::Certificate> {
     if let Some(vault_cacert) = path {
-        let reader = match std::fs::File::open(vault_cacert) {
-            Ok(fh) => std::io::BufReader::new(fh),
-            Err(e) => {
+        let reader = std::fs::File::open(vault_cacert)
+            .and_then(|fh| Ok(std::io::BufReader::new(fh)))
+            .or_else(|e| {
                 error!(logger, "Failed to read cert {vault_cacert} - {e}");
-                return None;
-            }
-        };
+                Err(e)
+            })
+            .ok()?;
 
         let cert_body = std::io::BufRead::lines(reader)
             .filter_map(|line| line.ok().filter(|line| !line.contains("-")))
             .collect::<Vec<String>>()
             .join("");
 
-        let decoded_cert = match base64::decode(cert_body) {
-            Ok(decoded_cert) => decoded_cert,
-            Err(e) => {
+        let decoded_cert = base64::decode(cert_body)
+            .or_else(|e| {
                 error!(logger, "Failed to decode certificate - {e}");
-                return None;
-            }
-        };
+                Err(Box::new(e) as Box<dyn error::Error>)
+            })
+            .ok()?;
 
-        match reqwest::Certificate::from_der(&decoded_cert) {
-            Ok(cert) => Some(cert),
-            Err(e) => {
+        reqwest::Certificate::from_der(&decoded_cert)
+            .or_else(|e| {
                 error!(logger, "Failed to create Certificate - {e}");
-                None
-            }
-        }
+                Err(Box::new(e) as Box<dyn error::Error>)
+            })
+            .ok()
     } else {
         None
     }
