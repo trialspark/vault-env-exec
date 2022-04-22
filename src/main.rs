@@ -14,40 +14,44 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 use uuid::Uuid;
 
-/// Simple program to greet a person
+/// Shim for switching uid / gid, and loading HashiCorp Vault values into then
+/// ENV of an executing program.
 #[derive(clap::Parser, Debug)]
 #[clap(author, version, about, long_about = None, )]
 struct Args {
+    /// AWS Region for for Vault RBAC auth
     #[clap(long, env, default_value = "us-east-1")]
     aws_region: String,
 
+    /// AWS access key for Vault RBAC auth
     #[clap(long, env)]
     aws_access_key_id: String,
 
+    /// AWS secret key for Vault RBAC auth
     #[clap(long, env)]
     aws_secret_access_key: String,
 
-    #[clap(long, env)]
-    vault_token: Option<String>,
-
+    /// Fully qualified domain of the Vault server
     #[clap(long, env)]
     vault_addr: String,
 
+    /// Path to vault certificate identitiy
     #[clap(long, env)]
     vault_cacert: Option<String>,
 
-    #[clap(long, env)]
-    vault_capath: Option<String>,
-
+    /// X-Vault-AWS-IAM-Server-ID value
     #[clap(long, env)]
     vault_security_header: String,
 
+    /// username:group for command execution
     #[clap()]
     user_spec: String,
 
+    /// Program to be exec'ed into
     #[clap()]
     command: String,
 
+    /// Arguments to pass to command
     #[clap()]
     args: Vec<String>,
 }
