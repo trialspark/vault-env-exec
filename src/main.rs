@@ -126,21 +126,15 @@ impl VaultClient {
             );
 
         trace!(self.logger, "Sending vault request - {:?}", request);
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(e) => {
-                error!(self.logger, "Failed to send request to Vault - {e}");
-                return Err(Box::new(e) as Box<dyn error::Error>);
-            }
-        };
+        let response = request.send().await.or_else(|e| {
+            error!(self.logger, "Failed to send request to Vault - {e}");
+            Err(Box::new(e) as Box<dyn error::Error>)
+        })?;
 
-        let text = match response.text().await {
-            Ok(text) => text,
-            Err(e) => {
-                error!(self.logger, "Failed to read response body from Vault - {e}");
-                return Err(Box::new(e) as Box<dyn error::Error>);
-            }
-        };
+        let text = response.text().await.or_else(|e| {
+            error!(self.logger, "Failed to read response body from Vault - {e}");
+            Err(Box::new(e) as Box<dyn error::Error>)
+        })?;
 
         trace!(self.logger, "Parsing vault response");
         serde_json::from_str::<serde_json::Value>(&text)
@@ -165,13 +159,10 @@ impl VaultClient {
             )
             .body(request_body);
 
-        let mut request = match request_builder {
-            Ok(request) => request,
-            Err(e) => {
-                error!(self.logger, "Error building vault auth request - {e}");
-                return Err(Box::new(e) as Box<dyn error::Error>);
-            }
-        };
+        let mut request = request_builder.or_else(|e| {
+            error!(self.logger, "Error building vault auth request - {e}");
+            Err(Box::new(e) as Box<dyn error::Error>)
+        })?;
 
         info!(self.logger, "Setting up request signing parameters");
         let signing_settings = SigningSettings::default();
@@ -310,7 +301,7 @@ fn switch_user(ctx: &VaultClient, user_spec: &String) -> Result<(), Box<dyn erro
 
     let user = User::from_name(&user_name).or_else(|e| {
         error!(ctx.logger, "Failed to lookup user name: {user_name} - {e}");
-        return Err(Box::new(e) as Box<dyn error::Error>);
+        Err(Box::new(e) as Box<dyn error::Error>)
     })?;
 
     let group = Group::from_name(&group_name).or_else(|e| {
