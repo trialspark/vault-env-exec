@@ -315,56 +315,55 @@ fn build_environment(vault_client: &VaultClient) -> Vec<CString> {
 
 fn switch_user(ctx: &VaultClient, user_spec: &String) -> Result<(), Box<dyn error::Error>> {
     let user_spec: Vec<&str> = user_spec.split(":").collect();
-    let (user_name, group_name) = match user_spec.len() {
-        2 => (user_spec[0], user_spec[1]),
-        _ => (user_spec[0], user_spec[0]),
-    };
 
-    let user = User::from_name(&user_name).or_else(|e| {
-        error!(ctx.logger, "Failed to lookup user name: {user_name} - {e}");
-        Err(Box::new(e) as Box<dyn error::Error>)
-    })?;
-
-    let group = Group::from_name(&group_name).or_else(|e| {
-        error!(
-            ctx.logger,
-            "Failed to lookup group name: {group_name} - {e}"
-        );
-        Err(Box::new(e) as Box<dyn error::Error>)
-    })?;
-
-    if let Some(group) = group {
-        setgid(group.gid).or_else(|e| {
-            error!(ctx.logger, "Failed to set GID to {} - {e}", group.gid);
-            Err(Box::new(e) as Box<dyn error::Error>)
-        })?;
-    } else {
-        warn!(
-            ctx.logger,
-            "No group named {group_name} found - Not setting GID"
-        );
-    }
-
-    if let Some(user) = user {
-        chdir(&user.dir).or_else(|e| {
+    if let Some(group_name) = user_spec.get(1) {
+        let group = Group::from_name(&group_name).or_else(|e| {
             error!(
                 ctx.logger,
-                "Failed to change directory {:?} - {e}", user.dir
+                "Failed to lookup group name: {group_name} - {e}"
             );
             Err(Box::new(e) as Box<dyn error::Error>)
         })?;
 
-        setuid(user.uid).or_else(|e| {
-            error!(ctx.logger, "Failed to set UID to {} - {e}", user.uid);
-            Err(Box::new(e) as Box<dyn error::Error>)
-        })?;
-    } else {
-        warn!(
-            ctx.logger,
-            "No user named {user_name} found - Not setting UID"
-        );
+        if let Some(group) = group {
+            setgid(group.gid).or_else(|e| {
+                error!(ctx.logger, "Failed to set GID to {} - {e}", group.gid);
+                Err(Box::new(e) as Box<dyn error::Error>)
+            })?;
+        } else {
+            warn!(
+                ctx.logger,
+                "No group named {group_name} found - Not setting GID"
+            );
+        }
     }
 
+    if let Some(user_name) = user_spec.get(0) {
+        let user = User::from_name(&user_name).or_else(|e| {
+            error!(ctx.logger, "Failed to lookup user name: {user_name} - {e}");
+            Err(Box::new(e) as Box<dyn error::Error>)
+        })?;
+
+        if let Some(user) = user {
+            chdir(&user.dir).or_else(|e| {
+                error!(
+                    ctx.logger,
+                    "Failed to change directory {:?} - {e}", user.dir
+                );
+                Err(Box::new(e) as Box<dyn error::Error>)
+            })?;
+
+            setuid(user.uid).or_else(|e| {
+                error!(ctx.logger, "Failed to set UID to {} - {e}", user.uid);
+                Err(Box::new(e) as Box<dyn error::Error>)
+            })?;
+        } else {
+            warn!(
+                ctx.logger,
+                "No user named {user_name} found - Not setting UID"
+            );
+        }
+    }
     Ok(())
 }
 
