@@ -31,6 +31,10 @@ struct Args {
     #[clap(long, env)]
     aws_secret_access_key: String,
 
+    /// AWS session token for Vault RPAB auth
+    #[clap(long, env)]
+    aws_session_token: Option<String>,
+
     /// Fully qualified domain of the Vault server
     #[clap(long, env)]
     vault_addr: String,
@@ -76,6 +80,7 @@ struct VaultClient {
     aws_region: String,
     aws_access_key_id: String,
     aws_secret_access_key: String,
+    aws_session_token: Option<String>,
     addr: String,
     cacert: Option<String>,
     security_header: Option<String>,
@@ -93,6 +98,7 @@ impl VaultClient {
         aws_region: String,
         aws_access_key_id: String,
         aws_secret_access_key: String,
+        aws_session_token: Option<String>,
     ) -> VaultClient {
         VaultClient {
             logger: logger,
@@ -104,6 +110,7 @@ impl VaultClient {
             aws_region: aws_region,
             aws_access_key_id: aws_access_key_id,
             aws_secret_access_key: aws_secret_access_key,
+            aws_session_token: aws_session_token,
         }
     }
 
@@ -150,11 +157,11 @@ impl VaultClient {
 
     fn authenticate(mut self) -> Result<VaultClient, Box<dyn error::Error>> {
         info!(self.logger, "Setting up mock sts:GetCallerIdentity request");
-        let request_method = "POST".to_owned();
+        let request_method = "POST";
         let request_body = b"Action=GetCallerIdentity&Version=2011-06-15";
 
         let request_builder = http::Request::builder()
-            .method(request_method.as_str())
+            .method(request_method)
             .uri("https://sts.amazonaws.com")
             .header(
                 "Content-Type",
@@ -173,14 +180,19 @@ impl VaultClient {
 
         info!(self.logger, "Setting up request signing parameters");
         let signing_settings = SigningSettings::default();
-        let signing_params = SigningParams::builder()
+        let mut signing_params_builder = SigningParams::builder()
             .region(&self.aws_region)
             .access_key(&self.aws_access_key_id)
             .secret_key(&self.aws_secret_access_key)
             .service_name("sts")
             .time(SystemTime::now())
-            .settings(signing_settings)
-            .build()?;
+            .settings(signing_settings);
+
+        if let Some(ref session_token) = self.aws_session_token {
+            signing_params_builder = signing_params_builder.security_token(session_token);
+        }
+
+        let signing_params = signing_params_builder.build()?;
 
         info!(self.logger, "Sign mock sts:GetCallerIdentity request");
         let signable_request = SignableRequest::from(&request);
@@ -196,10 +208,12 @@ impl VaultClient {
             serde_json::to_string(&convert(request.headers())).map(base64::encode)?;
         let iam_request_body = base64::encode(request_body);
 
+        let owned_request_method = String::from(request_method);
+
         let login_data = HashMap::from([
             ("role", &self.role),
             ("nonce", &nonce),
-            ("iam_http_request_method", &request_method),
+            ("iam_http_request_method", &owned_request_method),
             ("iam_request_url", &iam_request_url),
             ("iam_request_headers", &iam_request_headers),
             ("iam_request_body", &iam_request_body),
@@ -394,6 +408,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         args.aws_region,
         args.aws_access_key_id,
         args.aws_secret_access_key,
+        args.aws_session_token,
     )
     .authenticate()?;
 
