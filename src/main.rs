@@ -43,6 +43,10 @@ struct Args {
     #[clap(long, env)]
     vault_security_header: String,
 
+    /// Vault role to authenticate as
+    #[clap(long, env)]
+    vault_role: String,
+
     /// username:group for command execution
     #[clap()]
     user_spec: String,
@@ -75,6 +79,7 @@ struct VaultClient {
     addr: String,
     cacert: Option<String>,
     security_header: Option<String>,
+    role: String,
     token: Option<String>,
 }
 
@@ -84,6 +89,7 @@ impl VaultClient {
         addr: String,
         cacert: Option<String>,
         security_header: Option<String>,
+        role: String,
         aws_region: String,
         aws_access_key_id: String,
         aws_secret_access_key: String,
@@ -93,6 +99,7 @@ impl VaultClient {
             addr: addr,
             cacert: cacert,
             security_header: security_header,
+            role: role,
             token: None,
             aws_region: aws_region,
             aws_access_key_id: aws_access_key_id,
@@ -143,11 +150,11 @@ impl VaultClient {
 
     fn authenticate(mut self) -> Result<VaultClient, Box<dyn error::Error>> {
         info!(self.logger, "Setting up mock sts:GetCallerIdentity request");
-        let request_method = "POST";
+        let request_method = "POST".to_owned();
         let request_body = b"Action=GetCallerIdentity&Version=2011-06-15";
 
         let request_builder = http::Request::builder()
-            .method(request_method)
+            .method(request_method.as_str())
             .uri("https://sts.amazonaws.com")
             .header(
                 "Content-Type",
@@ -190,9 +197,9 @@ impl VaultClient {
         let iam_request_body = base64::encode(request_body);
 
         let login_data = HashMap::from([
-            ("role", "jenkins-vault-writer"),
+            ("role", &self.role),
             ("nonce", &nonce),
-            ("iam_http_request_method", request_method),
+            ("iam_http_request_method", &request_method),
             ("iam_request_url", &iam_request_url),
             ("iam_request_headers", &iam_request_headers),
             ("iam_request_body", &iam_request_body),
@@ -383,6 +390,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         args.vault_addr,
         args.vault_cacert,
         Some(args.vault_security_header),
+        args.vault_role,
         args.aws_region,
         args.aws_access_key_id,
         args.aws_secret_access_key,
