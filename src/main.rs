@@ -2,6 +2,8 @@
 extern crate slog;
 
 use aws_sigv4::http_request::{sign, SignableRequest, SigningParams, SigningSettings};
+use clap::Error as ClapError;
+use clap::ErrorKind;
 use clap::Parser;
 use http::{HeaderMap, HeaderValue};
 use nix::unistd::{chdir, execve, setgid, setuid, Group, User};
@@ -23,13 +25,17 @@ struct Args {
     #[clap(long, env, default_value = "us-east-1")]
     aws_region: String,
 
+    /// AWS credentials URI for Vault RBAC auth
+    #[clap(long, env)]
+    aws_container_credentials_relative_uri: Option<String>,
+
     /// AWS access key for Vault RBAC auth
     #[clap(long, env)]
-    aws_access_key_id: String,
+    aws_access_key_id: Option<String>,
 
     /// AWS secret key for Vault RBAC auth
     #[clap(long, env)]
-    aws_secret_access_key: String,
+    aws_secret_access_key: Option<String>,
 
     /// AWS session token for Vault RPAB auth
     #[clap(long, env)]
@@ -379,6 +385,58 @@ fn exec(command: String, args: &Vec<String>, env: &Vec<CString>) {
     execve(cmd.as_c_str(), &cmd_args, env).expect("exec failed");
 }
 
+#[tokio::main]
+async fn fetch_aws_credentials(aws_container_credentials_uri: String, logger: slog::Logger,) -> Result<(String, String, String), Box<dyn error::Error>> {
+    // fetch aws credentials
+    // curl 169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
+
+    let builder = reqwest::Client::builder();
+    let request = reqwest::Client::new().get(aws_container_credentials_uri);
+
+    let response = request.send().await.or_else(|e| {
+        error!(logger, "Failed to send request to aws - {e}");
+        Err(Box::new(e) as Box<dyn error::Error>)
+    })?;
+
+    let text = response.text().await.or_else(|e| {
+        error!(logger, "Failed to read response body from Vault - {e}");
+        Err(Box::new(e) as Box<dyn error::Error>)
+    })?;
+
+    info!(logger, "Parsing vault response");
+    serde_json::from_str::<serde_json::Value>(&text)
+        .or_else(|e| Err(Box::new(e) as Box<dyn error::Error>))
+        .and_then(|json| {
+            let access_key_id = json["AccessKeyId"]
+                .as_str()
+                .map(String::from)
+                .ok_or_else(|| {
+                    error!(logger, "No client auth token found");
+                    Box::new(serde_json::Error::custom("No client auth token"))
+                        as Box<dyn error::Error>
+                })?;
+
+            let secret_access_key = json["SecretAccessKey"]
+                .as_str()
+                .map(String::from)
+                .ok_or_else(|| {
+                    error!(logger, "No client auth token found");
+                    Box::new(serde_json::Error::custom("No client auth token"))
+                        as Box<dyn error::Error>
+                })?;
+
+            let token = json["Token"]
+                .as_str()
+                .map(String::from)
+                .ok_or_else(|| {
+                    error!(logger, "No client auth token found");
+                    Box::new(serde_json::Error::custom("No client auth token"))
+                        as Box<dyn error::Error>
+                })?;
+            return Ok((access_key_id, secret_access_key, token))
+        })
+}
+
 fn main() -> Result<(), Box<dyn error::Error>> {
     let args = Args::parse();
 
@@ -391,15 +449,27 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 
     #[cfg(not(debug_assertions))]
     let logger = Mutex::new(slog_json::Json::default(std::io::stderr()));
+    let main_logger = slog::Logger::root(
+                logger.map(slog::Fuse),
+                o!(
+                    "version" => env!("CARGO_PKG_VERSION"),
+                    "app" => env!("CARGO_PKG_NAME")
+                ),
+            );
+
+    if (args.aws_access_key_id.is_none() || args.aws_secret_access_key.is_none())
+        && args.aws_container_credentials_relative_uri.is_none()
+    {
+        // (create error) Err("bad (placeholder)")
+        error!(main_logger, "Missing aws credentials. Please provide aws_access_key_id and aws_secret_access_key or aws_container_credentials_relative_uri");
+        return Err(Box::new(ClapError::raw(
+            ErrorKind::MissingRequiredArgument,
+            "Missing aws credentials. Please provide aws_access_key_id and aws_secret_access_key or aws_container_credentials_relative_uri",
+        )));
+    }
 
     let vault_client = VaultClient::new(
-        slog::Logger::root(
-            logger.map(slog::Fuse),
-            o!(
-                "version" => env!("CARGO_PKG_VERSION"),
-                "app" => env!("CARGO_PKG_NAME")
-            ),
-        ),
+        main_logger,
         args.vault_addr,
         args.vault_cacert,
         Some(args.vault_security_header),
