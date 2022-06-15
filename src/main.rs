@@ -386,11 +386,10 @@ fn exec(command: String, args: &Vec<String>, env: &Vec<CString>) {
 }
 
 #[tokio::main]
-async fn fetch_aws_credentials(aws_container_credentials_uri: String, logger: slog::Logger,) -> Result<(String, String, String), Box<dyn error::Error>> {
-    // fetch aws credentials
-    // curl 169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI
-
-    let builder = reqwest::Client::builder();
+async fn fetch_aws_credentials(
+    aws_container_credentials_uri: String,
+    logger: &slog::Logger,
+) -> Result<(String, String, Option<String>), Box<dyn error::Error>> {
     let request = reqwest::Client::new().get(aws_container_credentials_uri);
 
     let response = request.send().await.or_else(|e| {
@@ -407,14 +406,15 @@ async fn fetch_aws_credentials(aws_container_credentials_uri: String, logger: sl
     serde_json::from_str::<serde_json::Value>(&text)
         .or_else(|e| Err(Box::new(e) as Box<dyn error::Error>))
         .and_then(|json| {
-            let access_key_id = json["AccessKeyId"]
-                .as_str()
-                .map(String::from)
-                .ok_or_else(|| {
-                    error!(logger, "No client auth token found");
-                    Box::new(serde_json::Error::custom("No client auth token"))
-                        as Box<dyn error::Error>
-                })?;
+            let access_key_id =
+                json["AccessKeyId"]
+                    .as_str()
+                    .map(String::from)
+                    .ok_or_else(|| {
+                        error!(logger, "No client auth token found");
+                        Box::new(serde_json::Error::custom("No client auth token"))
+                            as Box<dyn error::Error>
+                    })?;
 
             let secret_access_key = json["SecretAccessKey"]
                 .as_str()
@@ -425,15 +425,11 @@ async fn fetch_aws_credentials(aws_container_credentials_uri: String, logger: sl
                         as Box<dyn error::Error>
                 })?;
 
-            let token = json["Token"]
-                .as_str()
-                .map(String::from)
-                .ok_or_else(|| {
-                    error!(logger, "No client auth token found");
-                    Box::new(serde_json::Error::custom("No client auth token"))
-                        as Box<dyn error::Error>
-                })?;
-            return Ok((access_key_id, secret_access_key, token))
+            let token = json["Token"].as_str().map(String::from).ok_or_else(|| {
+                error!(logger, "No client auth token found");
+                Box::new(serde_json::Error::custom("No client auth token")) as Box<dyn error::Error>
+            })?;
+            return Ok((access_key_id, secret_access_key, Some(token)));
         })
 }
 
@@ -450,22 +446,37 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     #[cfg(not(debug_assertions))]
     let logger = Mutex::new(slog_json::Json::default(std::io::stderr()));
     let main_logger = slog::Logger::root(
-                logger.map(slog::Fuse),
-                o!(
-                    "version" => env!("CARGO_PKG_VERSION"),
-                    "app" => env!("CARGO_PKG_NAME")
-                ),
-            );
+        logger.map(slog::Fuse),
+        o!(
+            "version" => env!("CARGO_PKG_VERSION"),
+            "app" => env!("CARGO_PKG_NAME")
+        ),
+    );
+
+    let aws_access_key_id: String;
+    let aws_secret_access_key: String;
+    let aws_session_token: Option<String>;
 
     if (args.aws_access_key_id.is_none() || args.aws_secret_access_key.is_none())
-        && args.aws_container_credentials_relative_uri.is_none()
+        && !args.aws_container_credentials_relative_uri.is_none()
     {
-        // (create error) Err("bad (placeholder)")
-        error!(main_logger, "Missing aws credentials. Please provide aws_access_key_id and aws_secret_access_key or aws_container_credentials_relative_uri");
+        let aws_container_credentials_uri = format!(
+            "169.254.170.2{}",
+            args.aws_container_credentials_relative_uri.unwrap()
+        );
+        (aws_access_key_id, aws_secret_access_key, aws_session_token) =
+            fetch_aws_credentials(aws_container_credentials_uri, &main_logger)?;
+    } else if args.aws_access_key_id.is_none() || args.aws_secret_access_key.is_none() {
         return Err(Box::new(ClapError::raw(
             ErrorKind::MissingRequiredArgument,
             "Missing aws credentials. Please provide aws_access_key_id and aws_secret_access_key or aws_container_credentials_relative_uri",
         )));
+    } else {
+        (aws_access_key_id, aws_secret_access_key, aws_session_token) = (
+            args.aws_access_key_id.unwrap(),
+            args.aws_secret_access_key.unwrap(),
+            args.aws_session_token,
+        );
     }
 
     let vault_client = VaultClient::new(
@@ -475,9 +486,9 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         Some(args.vault_security_header),
         args.vault_role,
         args.aws_region,
-        args.aws_access_key_id,
-        args.aws_secret_access_key,
-        args.aws_session_token,
+        aws_access_key_id,
+        aws_secret_access_key,
+        aws_session_token,
     )
     .authenticate()?;
 
