@@ -385,6 +385,16 @@ fn exec(command: String, args: &Vec<String>, env: &Vec<CString>) {
     execve(cmd.as_c_str(), &cmd_args, env).expect("exec failed");
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all(deserialize = "PascalCase"))]
+struct AwsCredentials {
+    access_key_id: String,
+    expiration: String,
+    role_arn: String,
+    secret_access_key: String,
+    token: String,
+}
+
 #[tokio::main]
 async fn fetch_aws_credentials(
     aws_container_credentials_uri: String,
@@ -403,34 +413,15 @@ async fn fetch_aws_credentials(
     })?;
 
     info!(logger, "Parsing vault response");
-    serde_json::from_str::<serde_json::Value>(&text)
-        .or_else(|e| Err(Box::new(e) as Box<dyn error::Error>))
-        .and_then(|json| {
-            let access_key_id =
-                json["AccessKeyId"]
-                    .as_str()
-                    .map(String::from)
-                    .ok_or_else(|| {
-                        error!(logger, "No client auth token found");
-                        Box::new(serde_json::Error::custom("No client auth token"))
-                            as Box<dyn error::Error>
-                    })?;
 
-            let secret_access_key = json["SecretAccessKey"]
-                .as_str()
-                .map(String::from)
-                .ok_or_else(|| {
-                    error!(logger, "No client auth token found");
-                    Box::new(serde_json::Error::custom("No client auth token"))
-                        as Box<dyn error::Error>
-                })?;
+    let result = serde_json::from_str::<AwsCredentials>(&text)
+        .or_else(|e| Err(Box::new(e) as Box<dyn error::Error>))?;
 
-            let token = json["Token"].as_str().map(String::from).ok_or_else(|| {
-                error!(logger, "No client auth token found");
-                Box::new(serde_json::Error::custom("No client auth token")) as Box<dyn error::Error>
-            })?;
-            return Ok((access_key_id, secret_access_key, Some(token)));
-        })
+    Ok((
+        result.access_key_id,
+        result.secret_access_key,
+        Some(result.token),
+    ))
 }
 
 fn main() -> Result<(), Box<dyn error::Error>> {
@@ -453,31 +444,21 @@ fn main() -> Result<(), Box<dyn error::Error>> {
         ),
     );
 
-    let aws_access_key_id: String;
-    let aws_secret_access_key: String;
-    let aws_session_token: Option<String>;
-
-    if (args.aws_access_key_id.is_none() || args.aws_secret_access_key.is_none())
-        && !args.aws_container_credentials_relative_uri.is_none()
-    {
-        let aws_container_credentials_uri = format!(
-            "169.254.170.2{}",
-            args.aws_container_credentials_relative_uri.unwrap()
-        );
-        (aws_access_key_id, aws_secret_access_key, aws_session_token) =
-            fetch_aws_credentials(aws_container_credentials_uri, &main_logger)?;
-    } else if args.aws_access_key_id.is_none() || args.aws_secret_access_key.is_none() {
-        return Err(Box::new(ClapError::raw(
+    let (aws_access_key_id, aws_secret_access_key, aws_session_token) = match args {
+        Args { aws_access_key_id: Some(access_key_id), aws_secret_access_key: Some(secret_access_key), .. } => (
+            access_key_id,
+            secret_access_key,
+            args.aws_session_token,
+        ),
+        Args { aws_container_credentials_relative_uri: Some(uri), .. } => {
+            let aws_container_credentials_uri = format!("169.254.170.2{}", uri);
+            fetch_aws_credentials(aws_container_credentials_uri, &main_logger)?
+        },
+        _ => return Err(Box::new(ClapError::raw(
             ErrorKind::MissingRequiredArgument,
             "Missing aws credentials. Please provide aws_access_key_id and aws_secret_access_key or aws_container_credentials_relative_uri",
-        )));
-    } else {
-        (aws_access_key_id, aws_secret_access_key, aws_session_token) = (
-            args.aws_access_key_id.unwrap(),
-            args.aws_secret_access_key.unwrap(),
-            args.aws_session_token,
-        );
-    }
+        ))),
+    };
 
     let vault_client = VaultClient::new(
         main_logger,
