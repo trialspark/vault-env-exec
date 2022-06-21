@@ -4,7 +4,7 @@ FROM rust:1.61
 COPY ./ ./
 
 # Build your program for release
-ADD /containers/certs/vault-ca.crt /certs/
+ADD /containers/certs/ /certs/
 
 RUN useradd --home-dir /usr/lib/spark --create-home --system --user-group spark
 
