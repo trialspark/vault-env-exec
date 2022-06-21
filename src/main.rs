@@ -397,12 +397,14 @@ struct AwsCredentials {
 
 #[tokio::main]
 async fn fetch_aws_credentials(
-    aws_container_credentials_uri: String,
+    relative_uri: &String,
     logger: &slog::Logger,
 ) -> Result<(String, String, Option<String>), Box<dyn error::Error>> {
-    let request = reqwest::Client::new().get(aws_container_credentials_uri);
+    let aws_container_credentials_uri = format!("http://169.254.170.2{}", relative_uri);
+    let request = reqwest::Client::new().get(&aws_container_credentials_uri);
 
     let response = request.send().await.or_else(|e| {
+        error!(logger, "Failed to send request to aws - {aws_container_credentials_uri}");
         error!(logger, "Failed to send request to aws - {e}");
         Err(Box::new(e) as Box<dyn error::Error>)
     })?;
@@ -451,8 +453,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
             args.aws_session_token,
         ),
         Args { aws_container_credentials_relative_uri: Some(uri), .. } => {
-            let aws_container_credentials_uri = format!("169.254.170.2{}", uri);
-            fetch_aws_credentials(aws_container_credentials_uri, &main_logger)?
+            fetch_aws_credentials(&uri, &main_logger)?
         },
         _ => return Err(Box::new(ClapError::raw(
             ErrorKind::MissingRequiredArgument,
