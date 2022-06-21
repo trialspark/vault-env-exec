@@ -387,6 +387,7 @@ fn exec(command: String, args: &Vec<String>, env: &Vec<CString>) {
     execve(cmd.as_c_str(), &cmd_args, env).expect("exec failed");
 }
 
+#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 #[serde(rename_all(deserialize = "PascalCase"))]
 struct AwsCredentials {
