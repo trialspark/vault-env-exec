@@ -47,7 +47,7 @@ services:
       environment:
         AWS_DEFAULT_REGION: "us-east-1"
         AWS_CONTAINER_CREDENTIALS_RELATIVE_URI: "/creds"
-        VAULT_ADDR: "https://vault.trialspark.com:8200"
-        VAULT_SECURITY_HEADER: "vault.trialspark.com"
-        VAULT_ROLE: "spark-infra-test-reader"
-        VAULT_CACERT: "/certs/vault-ca.crt"
+        VAULT_ADDR: "${VAULT_ADDR}"
+        VAULT_SECURITY_HEADER: "${VAULT_SECURITY_HEADER}"
+        VAULT_ROLE: "${VAULT_ROLE}"
+        VAULT_CACERT: "${VAULT_CACERT}"
