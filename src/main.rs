@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 use uuid::Uuid;
 
-static CREDENTIALS_IP: &str = "169.254.170.2";
+static AWS_CREDENTIALS_IP: &str = "169.254.170.2";
 
 /// Shim for switching uid / gid, and loading HashiCorp Vault values into then
 /// ENV of an executing program.
@@ -402,7 +402,7 @@ async fn fetch_aws_credentials(
     relative_uri: &String,
     logger: &slog::Logger,
 ) -> Result<(String, String, Option<String>), Box<dyn error::Error>> {
-    let aws_container_credentials_uri = format!("http://{}{}", CREDENTIALS_IP, relative_uri);
+    let aws_container_credentials_uri = format!("http://{}{}", AWS_CREDENTIALS_IP, relative_uri);
     let request = reqwest::Client::new().get(&aws_container_credentials_uri);
 
     let response = request.send().await.or_else(|e| {

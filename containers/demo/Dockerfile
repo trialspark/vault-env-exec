@@ -4,10 +4,9 @@ FROM rust:1.61
 COPY ./ ./
 
 # Build your program for release
-ADD /containers/demo/vault-ca.crt /certs/
+ADD /containers/certs/vault-ca.crt /certs/
 
-RUN set -ex; \
-    useradd --home-dir /usr/lib/spark --create-home --user-group spark
+RUN useradd --home-dir /usr/lib/spark --create-home --system --user-group spark
 
 RUN cargo build --verbose
 
