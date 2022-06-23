@@ -15,6 +15,7 @@ use std::ffi::CString;
 use std::sync::Mutex;
 use std::time::SystemTime;
 use uuid::Uuid;
+use which::which;
 
 static AWS_CREDENTIALS_IP: &str = "169.254.170.2";
 
@@ -407,7 +408,10 @@ async fn fetch_aws_credentials(
     let request = reqwest::Client::new().get(&aws_container_credentials_uri);
 
     let response = request.send().await.or_else(|e| {
-        error!(logger, "Failed to send request to aws - {aws_container_credentials_uri}");
+        error!(
+            logger,
+            "Failed to send request to aws - {aws_container_credentials_uri}"
+        );
         error!(logger, "Failed to send request to aws - {e}");
         Err(Box::new(e) as Box<dyn error::Error>)
     })?;
@@ -480,8 +484,17 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     switch_user(&vault_client, &args.user_spec)?;
 
     let env = build_environment(&vault_client);
+    let command = which(&args.command)
+        .or_else(|e| {
+            error!(
+                vault_client.logger,
+                "Failed to located command executable {}: {e}", &args.command
+            );
+            Err(Box::new(e) as Box<dyn error::Error>)
+        })
+        .map(|path| String::from(path.to_str().unwrap()))?;
 
-    exec(args.command, &args.args, &env);
+    exec(command, &args.args, &env);
 
     Ok(())
 }
