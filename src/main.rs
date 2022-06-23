@@ -2,6 +2,8 @@
 extern crate slog;
 
 use aws_sigv4::http_request::{sign, SignableRequest, SigningParams, SigningSettings};
+use clap::Error as ClapError;
+use clap::ErrorKind;
 use clap::Parser;
 use http::{HeaderMap, HeaderValue};
 use nix::unistd::{chdir, execve, setgid, setuid, Group, User};
@@ -14,6 +16,8 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 use uuid::Uuid;
 
+static AWS_CREDENTIALS_IP: &str = "169.254.170.2";
+
 /// Shim for switching uid / gid, and loading HashiCorp Vault values into then
 /// ENV of an executing program.
 #[derive(clap::Parser, Debug)]
@@ -23,13 +27,17 @@ struct Args {
     #[clap(long, env, default_value = "us-east-1")]
     aws_region: String,
 
+    /// AWS credentials URI for Vault RBAC auth
+    #[clap(long, env)]
+    aws_container_credentials_relative_uri: Option<String>,
+
     /// AWS access key for Vault RBAC auth
     #[clap(long, env)]
-    aws_access_key_id: String,
+    aws_access_key_id: Option<String>,
 
     /// AWS secret key for Vault RBAC auth
     #[clap(long, env)]
-    aws_secret_access_key: String,
+    aws_secret_access_key: Option<String>,
 
     /// AWS session token for Vault RPAB auth
     #[clap(long, env)]
@@ -379,6 +387,48 @@ fn exec(command: String, args: &Vec<String>, env: &Vec<CString>) {
     execve(cmd.as_c_str(), &cmd_args, env).expect("exec failed");
 }
 
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(rename_all(deserialize = "PascalCase"))]
+struct AwsCredentials {
+    access_key_id: String,
+    expiration: String,
+    role_arn: String,
+    secret_access_key: String,
+    token: String,
+}
+
+#[tokio::main]
+async fn fetch_aws_credentials(
+    relative_uri: &String,
+    logger: &slog::Logger,
+) -> Result<(String, String, Option<String>), Box<dyn error::Error>> {
+    let aws_container_credentials_uri = format!("http://{}{}", AWS_CREDENTIALS_IP, relative_uri);
+    let request = reqwest::Client::new().get(&aws_container_credentials_uri);
+
+    let response = request.send().await.or_else(|e| {
+        error!(logger, "Failed to send request to aws - {aws_container_credentials_uri}");
+        error!(logger, "Failed to send request to aws - {e}");
+        Err(Box::new(e) as Box<dyn error::Error>)
+    })?;
+
+    let text = response.text().await.or_else(|e| {
+        error!(logger, "Failed to read response body from Vault - {e}");
+        Err(Box::new(e) as Box<dyn error::Error>)
+    })?;
+
+    info!(logger, "Parsing vault response");
+
+    let result = serde_json::from_str::<AwsCredentials>(&text)
+        .or_else(|e| Err(Box::new(e) as Box<dyn error::Error>))?;
+
+    Ok((
+        result.access_key_id,
+        result.secret_access_key,
+        Some(result.token),
+    ))
+}
+
 fn main() -> Result<(), Box<dyn error::Error>> {
     let args = Args::parse();
 
@@ -391,23 +441,39 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 
     #[cfg(not(debug_assertions))]
     let logger = Mutex::new(slog_json::Json::default(std::io::stderr()));
+    let main_logger = slog::Logger::root(
+        logger.map(slog::Fuse),
+        o!(
+            "version" => env!("CARGO_PKG_VERSION"),
+            "app" => env!("CARGO_PKG_NAME")
+        ),
+    );
+
+    let (aws_access_key_id, aws_secret_access_key, aws_session_token) = match args {
+        Args { aws_access_key_id: Some(access_key_id), aws_secret_access_key: Some(secret_access_key), .. } => (
+            access_key_id,
+            secret_access_key,
+            args.aws_session_token,
+        ),
+        Args { aws_container_credentials_relative_uri: Some(uri), .. } => {
+            fetch_aws_credentials(&uri, &main_logger)?
+        },
+        _ => return Err(Box::new(ClapError::raw(
+            ErrorKind::MissingRequiredArgument,
+            "Missing aws credentials. Please provide aws_access_key_id and aws_secret_access_key or aws_container_credentials_relative_uri",
+        ))),
+    };
 
     let vault_client = VaultClient::new(
-        slog::Logger::root(
-            logger.map(slog::Fuse),
-            o!(
-                "version" => env!("CARGO_PKG_VERSION"),
-                "app" => env!("CARGO_PKG_NAME")
-            ),
-        ),
+        main_logger,
         args.vault_addr,
         args.vault_cacert,
         Some(args.vault_security_header),
         args.vault_role,
         args.aws_region,
-        args.aws_access_key_id,
-        args.aws_secret_access_key,
-        args.aws_session_token,
+        aws_access_key_id,
+        aws_secret_access_key,
+        aws_session_token,
     )
     .authenticate()?;
 
