@@ -7,6 +7,7 @@ use clap::ErrorKind;
 use clap::Parser;
 use http::{HeaderMap, HeaderValue};
 use nix::unistd::{chdir, execve, setgid, setuid, Group, User};
+use nix::NixPath;
 use serde::de::Error;
 use slog::Drain;
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ use std::ffi::CString;
 use std::sync::Mutex;
 use std::time::SystemTime;
 use uuid::Uuid;
+use which::which;
 
 static AWS_CREDENTIALS_IP: &str = "169.254.170.2";
 
@@ -58,6 +60,10 @@ struct Args {
     /// Vault role to authenticate as
     #[clap(long, env)]
     vault_role: String,
+
+    /// working directory for execve
+    #[clap(long)]
+    working_directory: Option<String>,
 
     /// username:group for command execution
     #[clap()]
@@ -407,7 +413,10 @@ async fn fetch_aws_credentials(
     let request = reqwest::Client::new().get(&aws_container_credentials_uri);
 
     let response = request.send().await.or_else(|e| {
-        error!(logger, "Failed to send request to aws - {aws_container_credentials_uri}");
+        error!(
+            logger,
+            "Failed to send request to aws - {aws_container_credentials_uri}"
+        );
         error!(logger, "Failed to send request to aws - {e}");
         Err(Box::new(e) as Box<dyn error::Error>)
     })?;
@@ -479,9 +488,32 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 
     switch_user(&vault_client, &args.user_spec)?;
 
-    let env = build_environment(&vault_client);
+    if let Some(working_directory) = args.working_directory {
+        working_directory.as_str().with_nix_path(|dir| {
+            chdir(dir)
+                .or_else(|e| {
+                    error!(
+                        vault_client.logger,
+                        "Failed to change directory {:?} - {e}", working_directory
+                    );
+                    Err(Box::new(e) as Box<dyn error::Error>)
+                })
+                .ok();
+        })?;
+    }
 
-    exec(args.command, &args.args, &env);
+    let env = build_environment(&vault_client);
+    let command = which(&args.command)
+        .or_else(|e| {
+            error!(
+                vault_client.logger,
+                "Failed to located command executable {}: {e}", &args.command
+            );
+            Err(Box::new(e) as Box<dyn error::Error>)
+        })
+        .map(|path| String::from(path.to_str().unwrap()))?;
+
+    exec(command, &args.args, &env);
 
     Ok(())
 }

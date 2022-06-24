@@ -1,6 +1,6 @@
 [package]
 name = "vault-env-exec"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
@@ -12,8 +12,9 @@ nix = "0.23"
 reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+slog = { version = "2.7", features = ["max_level_trace", "release_max_level_warn"] }
+slog-json = "2.6"
+slog-term = "2.9"
 tokio = { version = "1.17", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "0.4", features = ["v4"] }
-slog = { version = "2.7", features = ["max_level_trace", "release_max_level_warn"] }
-slog-term = "2.9"
-slog-json = "2.6"
+which = "4.2"
