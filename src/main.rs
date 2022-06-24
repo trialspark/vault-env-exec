@@ -7,6 +7,7 @@ use clap::ErrorKind;
 use clap::Parser;
 use http::{HeaderMap, HeaderValue};
 use nix::unistd::{chdir, execve, setgid, setuid, Group, User};
+use nix::NixPath;
 use serde::de::Error;
 use slog::Drain;
 use std::collections::HashMap;
@@ -59,6 +60,10 @@ struct Args {
     /// Vault role to authenticate as
     #[clap(long, env)]
     vault_role: String,
+
+    /// working directory for execve
+    #[clap(long)]
+    working_directory: Option<String>,
 
     /// username:group for command execution
     #[clap()]
@@ -482,6 +487,20 @@ fn main() -> Result<(), Box<dyn error::Error>> {
     .authenticate()?;
 
     switch_user(&vault_client, &args.user_spec)?;
+
+    if let Some(working_directory) = args.working_directory {
+        working_directory.as_str().with_nix_path(|dir| {
+            chdir(dir)
+                .or_else(|e| {
+                    error!(
+                        vault_client.logger,
+                        "Failed to change directory {:?} - {e}", working_directory
+                    );
+                    Err(Box::new(e) as Box<dyn error::Error>)
+                })
+                .ok();
+        })?;
+    }
 
     let env = build_environment(&vault_client);
     let command = which(&args.command)
