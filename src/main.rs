@@ -244,6 +244,7 @@ impl VaultClient {
                 .map(String::from)
                 .ok_or_else(|| {
                     error!(self.logger, "No client auth token found");
+                    error!(self.logger, "{}", json);
                     Box::new(serde_json::Error::custom("No client auth token"))
                         as Box<dyn error::Error>
                 })
