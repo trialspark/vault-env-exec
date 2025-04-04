@@ -14,7 +14,7 @@ jobs:
           fetch-depth: 0
       - name: Build changelog
         id: build_changelog
-        uses: mikepenz/release-changelog-builder-action@main
+        uses: mikepenz/release-changelog-builder-action@e92187bd633e680ebfdd15961a7c30b2d097e7ad # v5.3.0
         with:
           configuration: 'release-changelog-builder-config.json'
         env:
@@ -49,12 +49,12 @@ jobs:
         with:
           fetch-depth: 0
       - name: Build Artifact
-        uses: actions-rs/cargo@v1
+        uses: actions-rs/toolchain@b2417cde72dcf67f306c0ae8e0828a81bf0b189f # v1.0.6
         with:
           command: build
           args: --release
       - name: Upload release binary
-        uses: svenstaro/upload-release-action@v1-release
+        uses: svenstaro/upload-release-action@14569a2d348419d066e34e5dfa65071ecd30b64b # v1.1.0
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: target/release/vault-env-exec
